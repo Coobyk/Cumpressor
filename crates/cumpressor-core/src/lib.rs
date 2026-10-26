@@ -779,17 +779,22 @@ mod tests {
 
     #[test]
     fn arguments_keep_the_site_ordering() {
-        let job = CompressJob::new("/videos/clip.mov", QualityProfile::Medium);
+        // Built with `join` so the expectation holds on Windows too, where the
+        // separator differs from the literal string in the source.
+        let input = Path::new("/videos").join("clip.mov");
+        let expected_output = Path::new("/videos").join("clip_rotato.mp4");
+        let job = CompressJob::new(&input, QualityProfile::Medium);
         let args: Vec<String> = job
             .arguments()
             .into_iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(
-            args,
+        let expected: Vec<String> = [
+            vec![
+                "-i".to_string(),
+                input.to_string_lossy().into_owned(),
+            ],
             [
-                "-i",
-                "/videos/clip.mov",
                 "-c:v",
                 "libx264",
                 "-tag:v",
@@ -805,9 +810,14 @@ mod tests {
                 "-nostats",
                 "-hide_banner",
                 "-y",
-                "/videos/clip_rotato.mp4"
             ]
-        );
+            .iter()
+            .map(|flag| flag.to_string())
+            .collect(),
+            vec![expected_output.to_string_lossy().into_owned()],
+        ]
+        .concat();
+        assert_eq!(args, expected);
     }
 
     #[test]
@@ -899,7 +909,11 @@ mod tests {
         assert_eq!(args.first(), Some(&"-i".to_string()));
         assert!(args.contains(&"-c:v".to_string()));
         assert!(args.contains(&"vp9_nvenc".to_string()));
-        assert_eq!(args.last(), Some(&"/videos/clip_rotato.webm".to_string()));
+        assert_eq!(
+            args.last(),
+            Some(&job.output.to_string_lossy().into_owned()),
+            "the output path is the last argument"
+        );
 
         // An explicitly chosen output survives when it is applied after the codec.
         let renamed = CompressJob::new("/videos/clip.mov", QualityProfile::Low)
