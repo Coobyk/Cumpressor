@@ -100,6 +100,7 @@ jobs:
             `brew install ffmpeg`, `winget install Gyan.FFmpeg`) or drop the
             binary next to Cumpressor.
         run: |
+          cd artifacts
           gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
           gh release create latest \
             --repo "$GITHUB_REPOSITORY" \
