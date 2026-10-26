@@ -1632,10 +1632,18 @@ mod window_tests {
         assert_eq!(job.output.extension().unwrap(), "webm");
     }
 
+    /// Point the app at a ffmpeg path that does not exist. These tests drive
+    /// the UI state machine; they must not depend on whether the machine
+    /// running them happens to have a real ffmpeg on its PATH.
+    fn with_fake_ffmpeg(this: &mut CumpressorApp) {
+        this.ffmpeg = Some(PathBuf::from("/nonexistent/ffmpeg"));
+    }
+
     #[gpui::test]
     fn compress_starts_the_first_waiting_video(cx: &mut TestAppContext) {
         let (view, cx) = render(cx);
         view.update(cx, |this, cx| {
+            with_fake_ffmpeg(this);
             this.load_files(
                 vec![
                     PathBuf::from("/nonexistent/a.mp4"),
@@ -1670,6 +1678,7 @@ mod window_tests {
     fn finishing_one_video_starts_the_next(cx: &mut TestAppContext) {
         let (view, cx) = render(cx);
         view.update(cx, |this, cx| {
+            with_fake_ffmpeg(this);
             this.load_files(
                 vec![
                     PathBuf::from("/nonexistent/a.mp4"),
@@ -1707,6 +1716,7 @@ mod window_tests {
     fn cancelling_returns_the_video_to_the_queue_and_stops(cx: &mut TestAppContext) {
         let (view, cx) = render(cx);
         view.update(cx, |this, cx| {
+            with_fake_ffmpeg(this);
             this.load_files(
                 vec![
                     PathBuf::from("/nonexistent/a.mp4"),
@@ -1741,6 +1751,7 @@ mod window_tests {
     fn a_failed_video_does_not_stop_the_batch(cx: &mut TestAppContext) {
         let (view, cx) = render(cx);
         view.update(cx, |this, cx| {
+            with_fake_ffmpeg(this);
             this.load_files(
                 vec![
                     PathBuf::from("/nonexistent/a.mp4"),
