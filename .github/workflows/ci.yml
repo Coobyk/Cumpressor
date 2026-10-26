@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    strategy:
+      # One platform failing must not cancel the others.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: cumpressor-linux-x64
+            binary: cumpressor
+          - os: macos-latest # Apple Silicon (arm64) runners
+            target: aarch64-apple-darwin
+            artifact: cumpressor-macos-arm64
+            binary: cumpressor
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: cumpressor-windows-x64
+            binary: cumpressor.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system dependencies (GPUI)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev \
+            libfontconfig1-dev libfreetype-dev libvulkan1
+
+      - name: Build (release)
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+        # Tests that need a real ffmpeg binary skip themselves when it is
+        # absent (macOS and Windows runners don't ship one; Linux does).
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
