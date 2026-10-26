@@ -1,0 +1,19 @@
+[package]
+name = "cumpressor"
+description = "Private, on-device video compressor built with Rust and GPUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cumpressor"
+path = "src/main.rs"
+
+[dependencies]
+cumpressor-core = { path = "../cumpressor-core" }
+gpui = "0.2.2"
+
+[dev-dependencies]
+# Headless window harness: renders real frames without a display or GPU.
+gpui = { version = "0.2.2", features = ["test-support"] }
