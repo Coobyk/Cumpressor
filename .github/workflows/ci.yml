@@ -63,11 +63,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Release (rolling latest)
-    # Publishes the "latest" prerelease with all three binaries after every
-    # green push to main. The previous latest release (and its tag) is replaced.
+    name: Release
+    # main pushes replace the rolling "latest" prerelease; v* tags create
+    # stable versioned releases (which the AUR packages pin).
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,27 +84,28 @@ jobs:
           tar czf cumpressor-macos-arm64.tar.gz -C cumpressor-macos-arm64 cumpressor
           (cd cumpressor-windows-x64 && zip ../cumpressor-windows-x64.zip cumpressor.exe)
 
-      - name: Replace the rolling latest release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          NOTES: |
-            Automated build of `main` @ ${{ github.sha }}.
-
-            | File | Platform |
-            | --- | --- |
-            | `cumpressor-linux-x64.tar.gz` | Linux x64 |
-            | `cumpressor-macos-arm64.tar.gz` | macOS (Apple Silicon) |
-            | `cumpressor-windows-x64.zip` | Windows x64 |
-
-            The app shells out to FFmpeg: install it (`apt install ffmpeg`,
-            `brew install ffmpeg`, `winget install Gyan.FFmpeg`) or drop the
-            binary next to Cumpressor.
         run: |
           cd artifacts
-          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
-          gh release create latest \
+          if [[ "$GITHUB_REF_NAME" == latest || "$GITHUB_REF_TYPE" == branch ]]; then
+            tag=latest
+            flags=(--prerelease)
+            title="Cumpressor latest (main @ ${GITHUB_SHA::7})"
+            notes="Automated build of \`main\` @ ${{ github.sha }}."
+          else
+            tag="$GITHUB_REF_NAME"
+            flags=()
+            title="Cumpressor $tag"
+            notes="Stable release of \`$tag\`."
+          fi
+          if [[ "$tag" == latest ]]; then
+            gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          fi
+          gh release create "$tag" \
             --repo "$GITHUB_REPOSITORY" \
-            --prerelease \
-            --title "Cumpressor latest (main @ ${GITHUB_SHA::7})" \
-            --notes "$NOTES" \
+            "${flags[@]}" \
+            --title "$title" \
+            --notes "$notes" \
             cumpressor-*.tar.gz cumpressor-*.zip
