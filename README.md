@@ -61,6 +61,8 @@ The UI thread never blocks: workers own the ffmpeg processes and push typed even
 
 ## Build and run
 
+Every push to `main` is built for Linux x64, macOS (Apple Silicon) and Windows x64; a green run publishes all three binaries to the rolling [latest release](https://github.com/Coobyk/Cumpressor/releases/latest) as `cumpressor-<platform>.tar.gz` / `.zip`.
+
 Requires a recent stable Rust toolchain and FFmpeg installed (`ffmpeg` on `PATH`). The app finds FFmpeg via `CUMPRESSOR_FFMPEG`, then a copy next to the executable, then `PATH`.
 
 ```sh
