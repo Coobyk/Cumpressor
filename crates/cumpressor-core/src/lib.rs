@@ -74,7 +74,7 @@ impl QualityProfile {
     /// Helper copy taken from the site's profile table.
     pub fn blurb(self) -> &'static str {
         match self {
-            Self::Low => "Fastest process, smallest file, lowest quality. Great for messages.",
+            Self::Low => "Fastest process, smallest file, lowest quality.",
             Self::Medium => "Balanced quality, size, and speed.",
             Self::High => "Sharper image, larger file, and a slower process.",
         }
@@ -132,33 +132,307 @@ impl QualityProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Video codecs
+// ---------------------------------------------------------------------------
+
+/// The video codecs the app can encode to.
+///
+/// The web tool is hard-wired to H.264 (`libx264`); the desktop app keeps that
+/// as the default and adds the codecs ffmpeg ships with. Every codec has a
+/// software encoder and an NVENC hardware encoder; which one is used is decided
+/// per machine by probing at startup (see the app's `engine` module).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VideoCodec {
+    /// `libx264` / `h264_nvenc`. The site's codec: plays everywhere.
+    #[default]
+    H264,
+    /// `libx265` / `hevc_nvenc`. Smaller than H.264, less universally playable.
+    H265,
+    /// `libvpx-vp9` / `vp9_nvenc`. The open WebM codec.
+    Vp9,
+    /// `libsvtav1` / `av1_nvenc`. Smallest files, newest codec.
+    Av1,
+}
+
+impl VideoCodec {
+    /// Codecs in the order the picker renders them.
+    pub const ALL: [VideoCodec; 4] = [Self::H264, Self::H265, Self::Vp9, Self::Av1];
+
+    /// Stable identifier used as the picker's element id and store key.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::H265 => "h265",
+            Self::Vp9 => "vp9",
+            Self::Av1 => "av1",
+        }
+    }
+
+    /// Label shown on the codec card.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::H264 => "H.264",
+            Self::H265 => "H.265",
+            Self::Vp9 => "VP9",
+            Self::Av1 => "AV1",
+        }
+    }
+
+    /// Helper copy shown under the codec card's title.
+    pub fn blurb(self) -> &'static str {
+        match self {
+            Self::H264 => "Plays everywhere. The web tool's default.",
+            Self::H265 => "Smaller than H.264, but less widely supported.",
+            Self::Vp9 => "Open WebM codec, good for browsers.",
+            Self::Av1 => "Smallest files, newest codec, slowest encode.",
+        }
+    }
+
+    /// Container extension for this codec's output.
+    ///
+    /// The web tool always produces MP4; VP9 belongs in WebM.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::H264 | Self::H265 | Self::Av1 => "mp4",
+            Self::Vp9 => "webm",
+        }
+    }
+
+    /// The CPU encoder ffmpeg uses when no working GPU encoder was probed.
+    pub fn software_encoder(self) -> &'static str {
+        match self {
+            Self::H264 => "libx264",
+            Self::H265 => "libx265",
+            Self::Vp9 => "libvpx-vp9",
+            Self::Av1 => "libsvtav1",
+        }
+    }
+
+    /// The NVENC encoder to probe for and prefer when it opens.
+    pub fn hardware_encoder(self) -> &'static str {
+        match self {
+            Self::H264 => "h264_nvenc",
+            Self::H265 => "hevc_nvenc",
+            Self::Vp9 => "vp9_nvenc",
+            Self::Av1 => "av1_nvenc",
+        }
+    }
+
+    /// The encoder that will actually run for this combination.
+    pub fn encoder_name(self, hardware: bool) -> &'static str {
+        if hardware {
+            self.hardware_encoder()
+        } else {
+            self.software_encoder()
+        }
+    }
+
+    /// NVENC's speed presets are `p1` (fastest) through `p7` (slowest); the
+    /// software presets map onto them so Low stays fastest and High slowest.
+    fn nvenc_preset(self, profile: QualityProfile) -> &'static str {
+        match profile {
+            QualityProfile::Low => "p1",
+            QualityProfile::Medium => "p2",
+            QualityProfile::High => "p4",
+        }
+    }
+
+    /// NVENC's `-cq` spans the same quality range as x264's `-crf`, so the
+    /// site's numbers carry over unchanged.
+    pub fn encoder_args(self, profile: QualityProfile, hardware: bool) -> Vec<OsString> {
+        let crf = profile.crf().to_string();
+        let args: &[&str] = match (self, hardware) {
+            // The site's exact argument string.
+            (Self::H264, false) => &[
+                "-c:v",
+                "libx264",
+                "-tag:v",
+                "avc1",
+                "-movflags",
+                "faststart",
+                "-crf",
+                &crf,
+                "-preset",
+                profile.preset(),
+            ],
+            (Self::H264, true) => &[
+                "-c:v",
+                "h264_nvenc",
+                "-tag:v",
+                "avc1",
+                "-movflags",
+                "faststart",
+                "-cq",
+                &crf,
+                "-preset",
+                self.nvenc_preset(profile),
+            ],
+            (Self::H265, false) => &[
+                "-c:v",
+                "libx265",
+                "-tag:v",
+                "hvc1",
+                "-movflags",
+                "faststart",
+                "-crf",
+                &crf,
+                "-preset",
+                profile.preset(),
+            ],
+            (Self::H265, true) => &[
+                "-c:v",
+                "hevc_nvenc",
+                "-tag:v",
+                "hvc1",
+                "-movflags",
+                "faststart",
+                "-cq",
+                &crf,
+                "-preset",
+                self.nvenc_preset(profile),
+            ],
+            // WebM has no `tag:v`/`movflags`; `-b:v 0` switches libvpx-vp9 into
+            // constant-quality mode, `-cpu-used` stands in for the x264 preset.
+            (Self::Vp9, false) => &[
+                "-c:v",
+                "libvpx-vp9",
+                "-b:v",
+                "0",
+                "-crf",
+                &crf,
+                "-cpu-used",
+                match profile {
+                    QualityProfile::Low => "8",
+                    QualityProfile::Medium => "5",
+                    QualityProfile::High => "2",
+                },
+                "-row-mt",
+                "1",
+            ],
+            (Self::Vp9, true) => &[
+                "-c:v",
+                "vp9_nvenc",
+                "-cq",
+                &crf,
+                "-preset",
+                self.nvenc_preset(profile),
+            ],
+            // SVT-AV1's presets run 1 (slowest) to 13 (fastest).
+            (Self::Av1, false) => &[
+                "-c:v",
+                "libsvtav1",
+                "-crf",
+                &crf,
+                "-preset",
+                match profile {
+                    QualityProfile::Low => "11",
+                    QualityProfile::Medium => "9",
+                    QualityProfile::High => "7",
+                },
+            ],
+            (Self::Av1, true) => &[
+                "-c:v",
+                "av1_nvenc",
+                "-tag:v",
+                "av01",
+                "-movflags",
+                "faststart",
+                "-cq",
+                &crf,
+                "-preset",
+                self.nvenc_preset(profile),
+            ],
+        };
+        args.iter().map(OsString::from).collect()
+    }
+
+    /// The settings line shown under a quality card, reflecting the encoder
+    /// that will actually run: `crf 30 · superfast`, `cq 30 · p2`,
+    /// `crf 30 · cpu-used 5`, and so on.
+    pub fn settings_label(self, profile: QualityProfile, hardware: bool) -> String {
+        let crf = profile.crf();
+        match (self, hardware) {
+            (Self::Vp9, false) => format!(
+                "crf {crf} · cpu-used {}",
+                match profile {
+                    QualityProfile::Low => 8,
+                    QualityProfile::Medium => 5,
+                    QualityProfile::High => 2,
+                }
+            ),
+            (Self::Av1, false) => format!(
+                "crf {crf} · preset {}",
+                match profile {
+                    QualityProfile::Low => 11,
+                    QualityProfile::Medium => 9,
+                    QualityProfile::High => 7,
+                }
+            ),
+            (_, true) => format!("cq {crf} · {}", self.nvenc_preset(profile)),
+            (_, false) => format!("crf {crf} · {}", profile.preset()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Jobs
 // ---------------------------------------------------------------------------
 
-/// A single "compress this file with this profile" request.
+/// A single "compress this file with this profile and codec" request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompressJob {
     /// Source video, read-only.
     pub input: PathBuf,
-    /// Destination `.mp4`. Written next to the input by default.
+    /// Destination file. Written next to the input by default, with the codec's
+    /// container extension.
     pub output: PathBuf,
     /// Encoder settings.
     pub profile: QualityProfile,
+    /// Video codec. Defaults to the web tool's H.264.
+    pub codec: VideoCodec,
+    /// Whether to use the codec's NVENC encoder. Only set this when a probe
+    /// confirmed the GPU encoder opens on this machine.
+    pub hardware: bool,
 }
 
 impl CompressJob {
-    /// Build a job that writes `<stem>_rotato.mp4` next to the input, like the site.
+    /// Build a job that writes `<stem>_rotato.<ext>` next to the input, like the site.
     pub fn new(input: impl Into<PathBuf>, profile: QualityProfile) -> Self {
         let input = input.into();
-        let output = input
-            .parent()
-            .map(|dir| dir.join(output_file_name(&input)))
-            .unwrap_or_else(|| PathBuf::from(output_file_name(&input)));
+        let output = Self::default_output(&input, VideoCodec::H264);
         Self {
             input,
             output,
             profile,
+            codec: VideoCodec::H264,
+            hardware: false,
         }
+    }
+
+    /// The output path the site's naming scheme produces for `input` and `codec`:
+    /// everything before the first dot of the file name, plus `_rotato` and the
+    /// codec's container extension.
+    pub fn default_output(input: &Path, codec: VideoCodec) -> PathBuf {
+        let name = output_file_name_with_extension(input, codec.extension());
+        input
+            .parent()
+            .map(|dir| dir.join(&name))
+            .unwrap_or_else(|| PathBuf::from(name))
+    }
+
+    /// Switch codec and recompute the default output name to match its container.
+    ///
+    /// Call before `with_output`: an explicitly chosen output path is kept.
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self.output = Self::default_output(&self.input, codec);
+        self
+    }
+
+    /// Whether to encode on the GPU instead of the CPU.
+    pub fn with_hardware(mut self, hardware: bool) -> Self {
+        self.hardware = hardware;
+        self
     }
 
     /// Override the destination file.
@@ -173,7 +447,7 @@ impl CompressJob {
     /// after the encoder arguments and before the output path in the original.
     pub fn arguments(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = vec!["-i".into(), self.input.clone().into_os_string()];
-        args.extend(self.profile.encoder_args());
+        args.extend(self.codec.encoder_args(self.profile, self.hardware));
         args.extend(
             ["-progress", "pipe:1", "-nostats", "-hide_banner", "-y"]
                 .into_iter()
@@ -188,12 +462,17 @@ impl CompressJob {
 /// browser file name and appending `_rotato.mp4`. `my.video.mp4` therefore becomes
 /// `my_rotato.mp4`. That quirk is preserved for parity.
 pub fn output_file_name(input: &Path) -> String {
+    output_file_name_with_extension(input, OUTPUT_EXTENSION)
+}
+
+/// [`output_file_name`] with a codec-chosen container extension.
+pub fn output_file_name_with_extension(input: &Path, extension: &str) -> String {
     let name = input
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let stem = name.split('.').next().unwrap_or(&name);
-    format!("{stem}{OUTPUT_SUFFIX}.{OUTPUT_EXTENSION}")
+    format!("{stem}{OUTPUT_SUFFIX}.{extension}")
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +808,115 @@ mod tests {
                 "/videos/clip_rotato.mp4"
             ]
         );
+    }
+
+    #[test]
+    fn codec_arguments_cover_every_encoder() {
+        let args = |codec: VideoCodec, profile: QualityProfile, hardware: bool| -> Vec<String> {
+            codec
+                .encoder_args(profile, hardware)
+                .into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+
+        // The default must stay byte-identical to the site's argument string.
+        assert_eq!(
+            args(VideoCodec::H264, QualityProfile::Medium, false),
+            [
+                "-c:v", "libx264", "-tag:v", "avc1", "-movflags", "faststart", "-crf", "30",
+                "-preset", "superfast"
+            ]
+        );
+        assert_eq!(
+            args(VideoCodec::H264, QualityProfile::Medium, true),
+            [
+                "-c:v", "h264_nvenc", "-tag:v", "avc1", "-movflags", "faststart", "-cq", "30",
+                "-preset", "p2"
+            ]
+        );
+        assert_eq!(
+            args(VideoCodec::H265, QualityProfile::High, false),
+            [
+                "-c:v", "libx265", "-tag:v", "hvc1", "-movflags", "faststart", "-crf", "23",
+                "-preset", "fast"
+            ]
+        );
+        assert_eq!(
+            args(VideoCodec::Vp9, QualityProfile::Low, false),
+            [
+                "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "40", "-cpu-used", "8", "-row-mt", "1"
+            ]
+        );
+        assert_eq!(
+            args(VideoCodec::Vp9, QualityProfile::Low, true),
+            ["-c:v", "vp9_nvenc", "-cq", "40", "-preset", "p1"]
+        );
+        assert_eq!(
+            args(VideoCodec::Av1, QualityProfile::High, false),
+            ["-c:v", "libsvtav1", "-crf", "23", "-preset", "7"]
+        );
+        assert_eq!(
+            args(VideoCodec::Av1, QualityProfile::High, true),
+            [
+                "-c:v", "av1_nvenc", "-tag:v", "av01", "-movflags", "faststart", "-cq", "23",
+                "-preset", "p4"
+            ]
+        );
+    }
+
+    #[test]
+    fn codec_metadata_is_consistent() {
+        assert_eq!(VideoCodec::ALL.len(), 4);
+        assert_eq!(VideoCodec::default(), VideoCodec::H264);
+        // Every codec needs an id, title, blurb, and a working encoder pair.
+        for codec in VideoCodec::ALL {
+            assert!(!codec.id().is_empty());
+            assert!(!codec.title().is_empty());
+            assert!(!codec.blurb().is_empty());
+            assert!(!codec.software_encoder().is_empty());
+            assert!(codec.hardware_encoder().ends_with("_nvenc"));
+            assert_eq!(codec.encoder_name(true), codec.hardware_encoder());
+            assert_eq!(codec.encoder_name(false), codec.software_encoder());
+        }
+        assert_eq!(VideoCodec::H264.extension(), "mp4");
+        assert_eq!(VideoCodec::H265.extension(), "mp4");
+        assert_eq!(VideoCodec::Vp9.extension(), "webm");
+        assert_eq!(VideoCodec::Av1.extension(), "mp4");
+    }
+
+    #[test]
+    fn jobs_carry_the_codec_into_names_and_arguments() {
+        let job = CompressJob::new("/videos/clip.mov", QualityProfile::Low)
+            .with_codec(VideoCodec::Vp9)
+            .with_hardware(true);
+        assert_eq!(job.output, PathBuf::from("/videos/clip_rotato.webm"));
+        let args: Vec<String> = job
+            .arguments()
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first(), Some(&"-i".to_string()));
+        assert!(args.contains(&"-c:v".to_string()));
+        assert!(args.contains(&"vp9_nvenc".to_string()));
+        assert_eq!(args.last(), Some(&"/videos/clip_rotato.webm".to_string()));
+
+        // An explicitly chosen output survives when it is applied after the codec.
+        let renamed = CompressJob::new("/videos/clip.mov", QualityProfile::Low)
+            .with_codec(VideoCodec::Av1)
+            .with_output("/elsewhere/out.mp4");
+        assert_eq!(renamed.output, PathBuf::from("/elsewhere/out.mp4"));
+
+        // The H.264 default keeps the site's naming and arguments.
+        let plain = CompressJob::new("/videos/clip.mov", QualityProfile::Medium);
+        assert_eq!(plain.output, PathBuf::from("/videos/clip_rotato.mp4"));
+        assert!(!plain.hardware);
+        let args: Vec<String> = plain
+            .arguments()
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"libx264".to_string()));
     }
 
     #[test]

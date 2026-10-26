@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cumpressor_core::{
-    CompressJob, ProgressParser, QualityProfile, SizeDelta, find_ffmpeg, frame_arguments,
-    parse_duration_header,
+    CompressJob, ProgressParser, QualityProfile, SizeDelta, VideoCodec, find_ffmpeg,
+    frame_arguments, parse_duration_header,
 };
 
 /// Generate a deliberately wasteful clip so compression has something to remove.
@@ -139,6 +139,62 @@ fn compresses_a_real_video_and_reports_progress() {
         .position(|window| window == b"mdat")
         .expect("mdat atom missing");
     assert!(moov < mdat, "faststart did not place moov before mdat");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Which encoders this ffmpeg binary was built with.
+fn available_encoders(ffmpeg: &Path) -> String {
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .expect("listing encoders failed");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn every_available_codec_encodes_to_its_container() {
+    let Some(ffmpeg) = find_ffmpeg() else {
+        eprintln!("skipping: ffmpeg not found");
+        return;
+    };
+    let encoders = available_encoders(&ffmpeg);
+
+    let dir = temp_dir("codecs");
+    let source = dir.join("sample.mp4");
+    make_sample_video(&ffmpeg, &source);
+
+    let mut exercised = 0;
+    for codec in VideoCodec::ALL {
+        let encoder = codec.software_encoder();
+        if !encoders.contains(encoder) {
+            eprintln!("skipping {encoder}: not in this ffmpeg build");
+            continue;
+        }
+
+        let job = CompressJob::new(&source, QualityProfile::Low).with_codec(codec);
+        assert_eq!(
+            job.output.extension().unwrap(),
+            codec.extension(),
+            "{} must write a .{} container",
+            encoder,
+            codec.extension()
+        );
+        let status = Command::new(&ffmpeg)
+            .args(job.arguments())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("encode failed");
+        assert!(status.success(), "{encoder} encode failed");
+
+        let compressed = std::fs::metadata(&job.output).unwrap().len();
+        assert!(compressed > 0, "{encoder} produced an empty file");
+        exercised += 1;
+    }
+    // libx264 and libvpx-vp9 ship with every distro ffmpeg; if even those were
+    // skipped something is wrong with the test itself.
+    assert!(exercised >= 2, "expected at least two codecs to run");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

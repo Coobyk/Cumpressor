@@ -15,16 +15,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cumpressor_core::{
-    CompressJob, ProgressParser, ProgressSnapshot, frame_arguments, parse_duration_header,
+    CompressJob, ProgressParser, ProgressSnapshot, VideoCodec, frame_arguments,
+    parse_duration_header,
 };
 
 /// How much encoder stderr is kept around for error reporting.
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
 
 /// Messages from worker threads back to the UI loop.
-/// Events carry the token of the request that produced them. The UI drops events
-/// from requests it has already replaced (for example when a second file is
-/// dropped while the first is still encoding).
+/// Events carry the token of the queue item that produced them. The UI applies
+/// an event only when that item is still in the state the event expects, so
+/// late events from a cancelled or restarted job are ignored.
 #[derive(Debug)]
 pub enum EngineEvent {
     /// Duration probe finished for a file that was just loaded.
@@ -62,6 +63,9 @@ pub enum EngineEvent {
         original: Option<Vec<u8>>,
         compressed: Option<Vec<u8>>,
     },
+    /// The startup hardware probe finished; these codecs have a working NVENC
+    /// encoder on this machine. Everything else uses its software encoder.
+    HardwareProbed { available: Vec<VideoCodec> },
 }
 
 /// Handle used to kill a running encode.
@@ -123,6 +127,63 @@ pub fn probe_async(ffmpeg: PathBuf, input: PathBuf, token: u64, tx: mpsc::Sender
             token,
             duration_secs,
         });
+    });
+}
+
+/// Check that ffmpeg can actually open an encoder, by running one frame through
+/// it on a synthetic clip and inspecting the exit status.
+///
+/// Listing in `ffmpeg -encoders` is not enough: an NVENC encoder can be compiled
+/// into the binary yet fail at initialisation because the driver, the GPU, or a
+/// required codec session is missing. Only a real open counts. The frame is
+/// 256×256 because NVENC rejects anything below its 145×49 minimum — a smaller
+/// probe would report every NVENC encoder as broken on a perfectly good GPU.
+pub fn encoder_opens(ffmpeg: &Path, encoder_name: &str) -> bool {
+    hidden_command(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:size=256x256:rate=10:duration=0.1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            encoder_name,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Probe every codec's NVENC encoder, one thread each, and report the codecs
+/// whose hardware encoder opened. Run once at startup; until this lands the UI
+/// treats every codec as CPU-only.
+pub fn probe_hardware_async(ffmpeg: PathBuf, tx: mpsc::Sender<EngineEvent>) {
+    thread::spawn(move || {
+        let probes: Vec<_> = VideoCodec::ALL
+            .map(|codec| {
+                let ffmpeg = ffmpeg.clone();
+                thread::spawn(move || (codec, encoder_opens(&ffmpeg, codec.hardware_encoder())))
+            })
+            .into_iter()
+            .collect();
+        let mut available: Vec<VideoCodec> = probes
+            .into_iter()
+            .filter_map(|probe| probe.join().ok())
+            .filter(|(_, opens)| *opens)
+            .map(|(codec, _)| codec)
+            .collect();
+        // Report in the picker's order, not whichever probe finished first.
+        available.sort_by_key(|codec| VideoCodec::ALL.iter().position(|c| c == codec));
+        let _ = tx.send(EngineEvent::HardwareProbed { available });
     });
 }
 
@@ -238,6 +299,7 @@ pub fn start_compression(
         };
 
         if worker_cancel.is_cancelled() {
+            let _ = std::fs::remove_file(&job.output);
             let _ = tx.send(EngineEvent::Failed {
                 token,
                 message: "Compression cancelled.".into(),
@@ -445,6 +507,47 @@ mod tests {
     }
 
     #[test]
+    fn hardware_encode_runs_on_the_gpu_when_it_can() {
+        let Some(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping: ffmpeg not found");
+            return;
+        };
+        // Self-skip on machines without a working NVENC H.264 encoder.
+        if !encoder_opens(&ffmpeg, "h264_nvenc") {
+            eprintln!("skipping: h264_nvenc does not open on this machine");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("cumpressor-nvenc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("input.mp4");
+        sample_video(&ffmpeg, &source);
+
+        let (tx, rx) = mpsc::channel();
+        let job = CompressJob::new(&source, QualityProfile::Medium)
+            .with_codec(VideoCodec::H264)
+            .with_hardware(true);
+        let output = job.output.clone();
+        let _handle = start_compression(job, ffmpeg, 1, tx);
+
+        match drain_until_finished(&rx).last() {
+            Some(EngineEvent::Finished {
+                output: finished,
+                compressed_bytes,
+                ..
+            }) => {
+                assert_eq!(finished, &output);
+                let original = std::fs::metadata(&source).unwrap().len();
+                assert!(*compressed_bytes > 0 && *compressed_bytes < original);
+            }
+            other => panic!("expected an NVENC success, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cancelling_kills_the_encoder() {
         let Some(ffmpeg) = find_ffmpeg() else {
             eprintln!("skipping: ffmpeg not found");
@@ -496,5 +599,42 @@ mod tests {
         assert!(!cancellation.is_cancelled());
         cancellation.cancel();
         assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn encoder_probe_rejects_encoders_that_do_not_open() {
+        let Some(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping: ffmpeg not found");
+            return;
+        };
+        // A software encoder that every ffmpeg build ships with must open.
+        assert!(encoder_opens(&ffmpeg, "libx264"));
+        // A nonsense encoder must be rejected, not treated as available.
+        assert!(!encoder_opens(&ffmpeg, "cumpressor_nonexistent_encoder"));
+    }
+
+    #[test]
+    fn hardware_probe_reports_codecs_in_picker_order() {
+        use cumpressor_core::VideoCodec;
+        let Some(ffmpeg) = find_ffmpeg() else {
+            eprintln!("skipping: ffmpeg not found");
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        probe_hardware_async(ffmpeg, tx);
+        let Ok(EngineEvent::HardwareProbed { available }) =
+            rx.recv_timeout(Duration::from_secs(120))
+        else {
+            panic!("expected a HardwareProbed event");
+        };
+        let order: Vec<VideoCodec> = VideoCodec::ALL.to_vec();
+        let positions: Vec<usize> = available
+            .iter()
+            .map(|codec| order.iter().position(|c| c == codec).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "available codecs must follow the picker order, got {available:?}"
+        );
     }
 }
