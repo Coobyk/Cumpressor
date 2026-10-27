@@ -61,7 +61,9 @@ The UI thread never blocks: workers own the ffmpeg processes and push typed even
 
 ## Build and run
 
-Every push to `main` is built for Linux x64, macOS (Apple Silicon) and Windows x64; a green run publishes all three binaries to the rolling [latest release](https://github.com/Coobyk/Cumpressor/releases/latest) as `cumpressor-<platform>.tar.gz` / `.zip`.
+Every push to `main` is built for Linux x64, macOS (Apple Silicon) and Windows x64; a green run publishes all three binaries to the rolling [latest release](https://github.com/Coobyk/Cumpressor/releases/latest) as `cumpressor-<platform>.tar.gz` / `.zip`. Tagged versions (e.g. `v0.1.0`) get their own stable release.
+
+On Arch Linux, Cumpressor is packaged in the AUR as [`cumpressor`](https://aur.archlinux.org/packages/cumpressor) (built from source) and [`cumpressor-bin`](https://aur.archlinux.org/packages/cumpressor-bin) (prebuilt binary). The PKGBUILDs live in [`aur/`](aur/).
 
 Requires a recent stable Rust toolchain and FFmpeg installed (`ffmpeg` on `PATH`). The app finds FFmpeg via `CUMPRESSOR_FFMPEG`, then a copy next to the executable, then `PATH`.
 
