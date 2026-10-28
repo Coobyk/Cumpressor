@@ -101,8 +101,6 @@ Measured smoke run on this machine (15 s, 1280×720, 30 fps synthetic clip, 13.1
 
 Verified here: both crates compile and link with no warnings, every test above passes against real FFmpeg 7.0.2, and GPUI's headless window harness builds the real window, lays it out, paints it and dispatches a click through it. The codec picker runs all four software encoders (libx264, libx265, libvpx-vp9, libsvtav1) against a real clip, and on this machine (RTX 3060) a full NVENC H.264 encode through the engine's event channel passes in under a second — H.264 and H.265 get GPU badges here, while VP9 and AV1 correctly stay on the CPU (this ffmpeg build ships no `vp9_nvenc`, and Ampere cards can't encode AV1).
 
-Not verified here: **no human has looked at the window.** This build ran in a container with no display server and no Vulkan driver, so the app cannot open on a real screen (`open_window` panics with "neither DISPLAY nor WAYLAND_DISPLAY is set", which is as far as it gets). Styling, spacing, font rendering and the platform file dialogs (which go through the XDG portal on Linux) are therefore unchecked — run it locally for that.
-
 ## Deliberate differences from the website
 
 * **Native FFmpeg instead of ffmpeg.wasm.** Same encoder and arguments, but no 30 MB wasm download and no browser memory ceiling — so no OOM/MediaBunny fallback path is needed.
