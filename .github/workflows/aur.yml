@@ -1,0 +1,39 @@
+name: AUR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [cumpressor, cumpressor-bin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up AUR SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.AUR_SSH_KEY }}" > ~/.ssh/aur_ed25519
+          chmod 600 ~/.ssh/aur_ed25519
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Push packaging to AUR
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/aur_ed25519
+          PKG: ${{ matrix.package }}
+        run: |
+          git clone "ssh://aur@aur.archlinux.org/$PKG.git" aur-repo
+          cp -r "aur/$PKG/." aur-repo/
+          cd aur-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet \
+            || git commit -m "Sync packaging from Coobyk/Cumpressor@${{ github.sha }}"
+          git push
